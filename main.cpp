@@ -182,7 +182,7 @@ public:
         textureDesc.Height = texHeight;
         textureDesc.MipLevels = 1;
         textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
         textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -192,7 +192,13 @@ public:
         data.SysMemPitch = texBytesPerRow;
 
         Check(device->CreateTexture2D(&textureDesc, &data, m_texture.GetAddressOf()));
-        Check(device->CreateShaderResourceView(m_texture.Get(), nullptr, m_textureView.GetAddressOf()));
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+        viewDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        viewDesc.Texture2D.MostDetailedMip = 0;
+        viewDesc.Texture2D.MipLevels = 1;
+        Check(device->CreateShaderResourceView(m_texture.Get(), &viewDesc, m_textureView.GetAddressOf()));
     }
 
     void Apply(const ComPtr<ID3D11DeviceContext1>& context) const
@@ -233,11 +239,13 @@ public:
         ctx->CopySubresourceRegion(texCopy.Get(), 0, 0, 0, 0, sharedTex.Get(), 0, nullptr);
 
         m_texture = texCopy;
+
         D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
         viewDesc.Format = DXGI_FORMAT_R8G8_UNORM;
         viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         viewDesc.Texture2D.MostDetailedMip = 0;
         viewDesc.Texture2D.MipLevels = 1;
+
         Check(m_device->CreateShaderResourceView(m_texture.Get(), &viewDesc, m_textureView.ReleaseAndGetAddressOf()));
     }
 
@@ -397,7 +405,6 @@ struct Window
 
         if (uMsg == WM_PAINT)
         {
-
             ComPtr<ID3D11DeviceContext1> context;
             m_device->GetImmediateContext1(context.GetAddressOf());
 
@@ -409,6 +416,7 @@ struct Window
 
             m_quad.Draw(context);
             m_swapChain.Present();
+            return 0;
         }
         else if (uMsg == WM_SIZE)
         {

@@ -233,7 +233,12 @@ public:
         ctx->CopySubresourceRegion(texCopy.Get(), 0, 0, 0, 0, sharedTex.Get(), 0, nullptr);
 
         m_texture = texCopy;
-        Check(m_device->CreateShaderResourceView(m_texture.Get(), nullptr, m_textureView.ReleaseAndGetAddressOf()));
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+        viewDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        viewDesc.Texture2D.MostDetailedMip = 0;
+        viewDesc.Texture2D.MipLevels = 1;
+        Check(m_device->CreateShaderResourceView(m_texture.Get(), &viewDesc, m_textureView.ReleaseAndGetAddressOf()));
     }
 
 private:
@@ -426,10 +431,10 @@ struct Window
             textureDesc.Height = texHeight;
             textureDesc.MipLevels = 1;
             textureDesc.ArraySize = layers;
-            textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            textureDesc.Format = DXGI_FORMAT_NV12;
             textureDesc.SampleDesc.Count = 1;
             textureDesc.Usage = D3D11_USAGE_DEFAULT;
-            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
             textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
 
             std::vector<D3D11_SUBRESOURCE_DATA> data(layers);

@@ -182,19 +182,19 @@ public:
         textureDesc.Height = texHeight;
         textureDesc.MipLevels = 1;
         textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        textureDesc.SampleDesc = {1, 0};
         textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
         textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-        D3D11_SUBRESOURCE_DATA data = {};
-        data.pSysMem = testTextureBytes.data();
-        data.SysMemPitch = texBytesPerRow;
+        D3D11_SUBRESOURCE_DATA data[] = {
+            {testTextureBytes.data(), texBytesPerRow, 0}
+        };
 
-        Check(device->CreateTexture2D(&textureDesc, &data, m_texture.GetAddressOf()));
+        Check(device->CreateTexture2D(&textureDesc, data, m_texture.GetAddressOf()));
 
         D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-        viewDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        viewDesc.Format = textureDesc.Format;
         viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         viewDesc.Texture2D.MostDetailedMip = 0;
         viewDesc.Texture2D.MipLevels = 1;
@@ -323,8 +323,7 @@ public:
         swapDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         swapDesc.BufferCount = 2;
         swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.SampleDesc.Count = 1;
-        swapDesc.SampleDesc.Quality = 0;
+        swapDesc.SampleDesc = {1, 0};
         swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
         const auto factory = GetFactory(device);
@@ -430,8 +429,8 @@ struct Window
             constexpr int texWidth = 200;
             constexpr int texHeight = 100;
             constexpr int layers = 30;
-            const std::vector<std::array<unsigned char, 4>> testTextureBytes(texWidth * texHeight * layers, { 0, 255, 0, 255 });
-            constexpr int texBytesPerRow = 4 * texWidth;
+            const std::vector<char> testTextureBytes(texWidth * texHeight * 3 / 2, 128);
+            constexpr int texBytesPerRow = 12 * texWidth;
 
             // Create Texture
             D3D11_TEXTURE2D_DESC textureDesc = {};
@@ -440,7 +439,7 @@ struct Window
             textureDesc.MipLevels = 1;
             textureDesc.ArraySize = layers;
             textureDesc.Format = DXGI_FORMAT_NV12;
-            textureDesc.SampleDesc.Count = 1;
+            textureDesc.SampleDesc = {1, 0};
             textureDesc.Usage = D3D11_USAGE_DEFAULT;
             textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
             textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
@@ -449,7 +448,8 @@ struct Window
             for (auto& layer : data)
             {
                 layer.pSysMem = testTextureBytes.data();
-                layer.SysMemPitch = texBytesPerRow;
+                layer.SysMemPitch = texWidth;
+                layer.SysMemSlicePitch = 0;
             }
 
             ComPtr<ID3D11Texture2D> texture;

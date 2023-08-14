@@ -169,6 +169,7 @@ class Texture
 {
 public:
     Texture(const ComPtr<ID3D11Device1>& device)
+        : m_device{ device }
     {
         constexpr int texWidth = 200;
         constexpr int texHeight = 100;
@@ -200,7 +201,43 @@ public:
         context->PSSetShaderResources(0, 1, textures);
     }
 
+    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
+    {
+        ComPtr<IDXGIResource1> dxgiResource;
+        Check(texture.As(&dxgiResource));
+
+        HANDLE h{};
+        Check(dxgiResource->GetSharedHandle(&h));
+
+        ComPtr<ID3D11Texture2D> sharedTex;
+        Check(m_device->OpenSharedResource(h, IID_PPV_ARGS(&sharedTex)));
+
+        D3D11_TEXTURE2D_DESC sharedDesc;
+        sharedTex->GetDesc(&sharedDesc);
+
+        D3D11_TEXTURE2D_DESC texDesc = {};
+        texDesc.Width = sharedDesc.Width;
+        texDesc.Height = sharedDesc.Height;
+        texDesc.Format = sharedDesc.Format;
+        texDesc.ArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        texDesc.MiscFlags = 0;
+        texDesc.SampleDesc = { 1, 0 };
+
+        ComPtr<ID3D11Texture2D> texCopy;
+        Check(m_device->CreateTexture2D(&texDesc, nullptr, texCopy.GetAddressOf()));
+
+        ComPtr<ID3D11DeviceContext> ctx;
+        m_device->GetImmediateContext(ctx.GetAddressOf());
+        ctx->CopySubresourceRegion(texCopy.Get(), 0, 0, 0, 0, sharedTex.Get(), 0, nullptr);
+
+        m_texture = texCopy;
+        Check(m_device->CreateShaderResourceView(m_texture.Get(), nullptr, m_textureView.ReleaseAndGetAddressOf()));
+    }
+
 private:
+    ComPtr<ID3D11Device1> m_device;
     ComPtr<ID3D11Texture2D> m_texture;
     ComPtr<ID3D11ShaderResourceView> m_textureView;
 };
@@ -247,6 +284,11 @@ public:
         constexpr UINT offset = 0;
         context->IASetVertexBuffers(0, 1, vertBuffers, &m_stride, &offset);
         context->Draw(m_vertexCount, 0);
+    }
+
+    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
+    {
+        m_texture.SetTexture(device, texture);
     }
 
 private:
@@ -355,7 +397,7 @@ struct Window
             m_device->GetImmediateContext1(context.GetAddressOf());
 
 
-            const D3D11_VIEWPORT viewPorts [] = {{0.0f, 0.0f, static_cast<FLOAT>(m_size.cx), static_cast<FLOAT>(m_size.cy), 0.0f, 1.0f}};
+            const D3D11_VIEWPORT viewPorts[] = { {0.0f, 0.0f, static_cast<FLOAT>(m_size.cx), static_cast<FLOAT>(m_size.cy), 0.0f, 1.0f} };
             context->RSSetViewports(1, viewPorts);
 
             m_swapChain.Apply(context);
@@ -369,6 +411,39 @@ struct Window
             m_size.cy = HIWORD(lParam);
             m_swapChain.Resize(m_device, m_size);
         }
+        else if (uMsg == WM_KEYDOWN)
+        {
+            const ComPtr<ID3D11Device1> device = CreateDevice();
+            constexpr int texWidth = 200;
+            constexpr int texHeight = 100;
+            constexpr int layers = 30;
+            const std::vector<std::array<unsigned char, 4>> testTextureBytes(texWidth * texHeight * layers, { 0, 255, 0, 255 });
+            constexpr int texBytesPerRow = 4 * texWidth;
+
+            // Create Texture
+            D3D11_TEXTURE2D_DESC textureDesc = {};
+            textureDesc.Width = texWidth;
+            textureDesc.Height = texHeight;
+            textureDesc.MipLevels = 1;
+            textureDesc.ArraySize = layers;
+            textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            textureDesc.SampleDesc.Count = 1;
+            textureDesc.Usage = D3D11_USAGE_DEFAULT;
+            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+
+            std::vector<D3D11_SUBRESOURCE_DATA> data(layers);
+            for (auto& layer : data)
+            {
+                layer.pSysMem = testTextureBytes.data();
+                layer.SysMemPitch = texBytesPerRow;
+            }
+
+            ComPtr<ID3D11Texture2D> texture;
+            Check(device->CreateTexture2D(&textureDesc, data.data(), texture.GetAddressOf()));
+            m_quad.SetTexture(device, texture);
+            InvalidateRect(m_wnd, nullptr, TRUE);
+        }
 
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -381,7 +456,7 @@ private:
 
     const ComPtr<ID3D11Device1> m_device = CreateDevice();
     SwapChain m_swapChain{ m_device, m_wnd };
-    const Quad m_quad{ m_device };
+    Quad m_quad{ m_device };
     SIZE m_size{};
 };
 

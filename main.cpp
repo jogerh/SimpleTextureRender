@@ -213,70 +213,48 @@ public:
     Texture(const ComPtr<ID3D11Device1>& device)
         : m_device{ device }
     {
-        //constexpr int texWidth = 200;
-        //constexpr int texHeight = 100;
-        //auto texData = CreateYUV420Sample(0, texWidth, texHeight, 1);
-        //constexpr int texBytesPerRow = 4 * texWidth;
-
-        //// Create Texture
-        //D3D11_TEXTURE2D_DESC textureDesc = {};
-        //textureDesc.Width = texWidth;
-        //textureDesc.Height = texHeight;
-        //textureDesc.MipLevels = 1;
-        //textureDesc.ArraySize = 1;
-        //textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-        //textureDesc.SampleDesc = { 1, 0 };
-        //textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
-        //textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-        //D3D11_SUBRESOURCE_DATA data[] = {
-        //    {texData.front().data(), texBytesPerRow, 0}
-        //};
-
-        //Check(device->CreateTexture2D(&textureDesc, data, m_texture.GetAddressOf()));
-
-        //SetTexture(device, m_texture);
     }
 
     void Apply(const ComPtr<ID3D11DeviceContext1>& context)
     {
-        ComPtr<ID3D11Texture2D> texture;
-        {
-            std::scoped_lock guard{m_mutex};
-            texture = m_sharedTexture;
-        }
-        if (!texture)
+        if (!m_sharedTexture)
             return;
-        ComPtr<IDXGIResource1> dxgiResource;
-        Check(texture.As(&dxgiResource));
 
-        HANDLE h{};
-        Check(dxgiResource->GetSharedHandle(&h));
+        ComPtr<IDXGIResource1> dxgiResource;
+        Check(m_sharedTexture.As(&dxgiResource));
+
+        HANDLE textureHandle{};
+        Check(dxgiResource->GetSharedHandle(&textureHandle));
 
         ComPtr<ID3D11Texture2D> sharedTex;
-        Check(m_device->OpenSharedResource(h, IID_PPV_ARGS(&sharedTex)));
+        Check(m_device->OpenSharedResource(textureHandle, IID_PPV_ARGS(&sharedTex)));
 
         D3D11_TEXTURE2D_DESC sharedDesc;
         sharedTex->GetDesc(&sharedDesc);
 
-        D3D11_TEXTURE2D_DESC texDesc = {};
-        texDesc.Width = sharedDesc.Width;
-        texDesc.Height = sharedDesc.Height;
-        texDesc.Format = sharedDesc.Format;
-        texDesc.ArraySize = 1;
-        texDesc.MipLevels = 1;
-        texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        texDesc.MiscFlags = 0;
-        texDesc.SampleDesc = { 1, 0 };
-
-        ComPtr<ID3D11Texture2D> texCopy;
-        Check(m_device->CreateTexture2D(&texDesc, nullptr, texCopy.GetAddressOf()));
-
         ComPtr<ID3D11DeviceContext> ctx;
         m_device->GetImmediateContext(ctx.GetAddressOf());
-        ctx->CopySubresourceRegion(texCopy.Get(), 0, 0, 0, 0, sharedTex.Get(), 0, nullptr);
+        ctx->CopySubresourceRegion(m_displayTexture.Get(), 0, 0, 0, 0, sharedTex.Get(), m_displayLayer % sharedDesc.ArraySize, nullptr);
 
-        m_texture = texCopy;
+        ID3D11ShaderResourceView* textureViews[] = { m_yView.Get(), m_uvView.Get() };
+        context->PSSetShaderResources(0, 2, textureViews);
+
+        ++m_displayLayer;
+    }
+
+    void SetTexture(const ComPtr<ID3D11Texture2D>& texture)
+    {
+        m_sharedTexture = texture;
+
+        D3D11_TEXTURE2D_DESC sharedDesc;
+        m_sharedTexture->GetDesc(&sharedDesc);
+
+        D3D11_TEXTURE2D_DESC displayTexDesc = sharedDesc;
+        displayTexDesc.ArraySize = 1;
+        displayTexDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        displayTexDesc.MiscFlags = 0;
+
+        Check(m_device->CreateTexture2D(&displayTexDesc, nullptr, m_displayTexture.ReleaseAndGetAddressOf()));
 
         D3D11_SHADER_RESOURCE_VIEW_DESC yDesc{};
         yDesc.Format = DXGI_FORMAT_R8_UNORM;
@@ -284,7 +262,7 @@ public:
         yDesc.Texture2D.MostDetailedMip = 0;
         yDesc.Texture2D.MipLevels = 1;
 
-        Check(m_device->CreateShaderResourceView(m_texture.Get(), &yDesc, m_yView.ReleaseAndGetAddressOf()));
+        Check(m_device->CreateShaderResourceView(m_displayTexture.Get(), &yDesc, m_yView.ReleaseAndGetAddressOf()));
 
         D3D11_SHADER_RESOURCE_VIEW_DESC uvDesc{};
         uvDesc.Format = DXGI_FORMAT_R8G8_UNORM;
@@ -292,25 +270,16 @@ public:
         uvDesc.Texture2D.MostDetailedMip = 0;
         uvDesc.Texture2D.MipLevels = 1;
 
-        Check(m_device->CreateShaderResourceView(m_texture.Get(), &uvDesc, m_uvView.ReleaseAndGetAddressOf()));
-
-        ID3D11ShaderResourceView* textureViews[] = { m_yView.Get(), m_uvView.Get() };
-        context->PSSetShaderResources(0, 2, textureViews);
-    }
-
-    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
-    {
-        std::scoped_lock guard{m_mutex};
-        m_sharedTexture = texture;
+        Check(m_device->CreateShaderResourceView(m_displayTexture.Get(), &uvDesc, m_uvView.ReleaseAndGetAddressOf()));
     }
 
 private:
-    mutable std::mutex m_mutex;
     ComPtr<ID3D11Device1> m_device;
-    ComPtr<ID3D11Texture2D> m_texture;
+    ComPtr<ID3D11Texture2D> m_displayTexture;
     ComPtr<ID3D11ShaderResourceView> m_yView;
     ComPtr<ID3D11ShaderResourceView> m_uvView;
     ComPtr<ID3D11Texture2D> m_sharedTexture;
+    unsigned int m_displayLayer = 0;
 };
 
 class Quad
@@ -357,9 +326,9 @@ public:
         context->Draw(m_vertexCount, 0);
     }
 
-    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
+    void SetTexture(const ComPtr<ID3D11Texture2D>& texture)
     {
-        m_texture.SetTexture(device, texture);
+        m_texture.SetTexture(texture);
     }
 
 private:
@@ -439,6 +408,86 @@ private:
     ComPtr<ID3D11RenderTargetView> m_frameBufferView;
 };
 
+class VideoProducer
+{
+public:
+    VideoProducer()
+    {
+        m_device->GetImmediateContext1(m_context.GetAddressOf());
+
+        constexpr int width = 200;
+        constexpr int height = 100;
+        constexpr int pitch = width;
+
+        constexpr int layers = 30;
+        static int rot = 0;
+
+        // Create Texture
+        D3D11_TEXTURE2D_DESC esc = {};
+        esc.Width = width;
+        esc.Height = height;
+        esc.MipLevels = 1;
+        esc.ArraySize = layers;
+        esc.Format = DXGI_FORMAT_NV12;
+        esc.SampleDesc = { 1, 0 };
+        esc.Usage = D3D11_USAGE_DEFAULT;
+        esc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
+        esc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+
+        Check(m_device->CreateTexture2D(&esc, nullptr, m_texture.GetAddressOf()));
+
+        m_thread = std::thread([this]
+        {
+            while(!m_stopped.load(std::memory_order_relaxed))
+                Produce();
+        });
+    }
+
+    ~VideoProducer()
+    {
+        m_stopped.store(true, std::memory_order_relaxed);
+        m_thread.join();
+    }
+
+    ComPtr<ID3D11Texture2D> GetTexture()
+    {
+        return m_texture;
+    }
+
+private:
+    void Produce()
+    {
+        D3D11_TEXTURE2D_DESC desc = {};
+        m_texture->GetDesc(&desc);
+
+        for(UINT layer = 0; layer < desc.ArraySize; ++ layer)
+        {
+            const auto image = CreateYUV420Sample(m_time + layer, desc.Width, desc.Height, 1).front();
+            D3D11_SUBRESOURCE_DATA data{};
+            data.pSysMem = image.data();
+            data.SysMemPitch = desc.Width;
+
+            D3D11_TEXTURE2D_DESC planeDesc = desc;
+            planeDesc.ArraySize = 1;
+            planeDesc.Usage = D3D11_USAGE_IMMUTABLE;
+
+            ComPtr<ID3D11Texture2D> plane;
+            Check(m_device->CreateTexture2D(&planeDesc, &data, plane.GetAddressOf()));
+            m_context->CopySubresourceRegion1(m_texture.Get(), layer, 0, 0, 0, plane.Get(), 0, nullptr, D3D11_COPY_DISCARD);
+        }
+        ++m_time;
+    }
+
+    std::thread m_thread;
+
+    std::atomic_bool m_stopped = false;
+    ComPtr<ID3D11Device1> m_device = CreateDevice();
+    ComPtr<ID3D11DeviceContext1> m_context;
+    std::mutex m_mutex;
+    ComPtr<ID3D11Texture2D> m_texture;
+    int m_time = 0;
+};
+
 struct Window
 {
     explicit Window()
@@ -483,47 +532,15 @@ struct Window
         }
         else if (uMsg == WM_KEYDOWN)
         {
-            std::thread thd([this]()
-                {
-                while (true){
-                    const ComPtr<ID3D11Device1> device = CreateDevice();
-                    constexpr int texWidth = 200;
-                    constexpr int texHeight = 100;
-                    constexpr int rowPitch = texWidth;
-
-                    constexpr int layers = 30;
-                    static int rot = 0;
-                    auto testTextureBytes = CreateYUV420Sample(rot++, texWidth, texHeight, layers);
-
-                    // Create Texture
-                    D3D11_TEXTURE2D_DESC textureDesc = {};
-                    textureDesc.Width = texWidth;
-                    textureDesc.Height = texHeight;
-                    textureDesc.MipLevels = 1;
-                    textureDesc.ArraySize = layers;
-                    textureDesc.Format = DXGI_FORMAT_NV12;
-                    textureDesc.SampleDesc = { 1, 0 };
-                    textureDesc.Usage = D3D11_USAGE_DEFAULT;
-                    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
-                    textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
-
-                    std::vector<D3D11_SUBRESOURCE_DATA> data(layers);
-                    for (size_t i = 0; i < layers; ++i) {
-                        auto& layer = data[i];
-                        layer.pSysMem = testTextureBytes[i].data();
-                        layer.SysMemPitch = rowPitch;
-                        layer.SysMemSlicePitch = 0;
-                    }
-                    ComPtr<ID3D11Texture2D> texture;
-                    Check(device->CreateTexture2D(&textureDesc, data.data(), texture.GetAddressOf()));
-                    m_quad.SetTexture(device, texture);
-                    InvalidateRect(m_wnd, nullptr, TRUE);
-                }
-                });
-            m_threads.push_back(std::move(thd));
+            
         }
 
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+
+    void SetTexture(const ComPtr<ID3D11Texture2D>& texture)
+    {
+        m_quad.SetTexture(texture);
     }
 
 private:
@@ -604,35 +621,13 @@ private:
 };
 
 
-
-//
-//
-//ComPtr<ID3D11Texture2D> CreateTexture(const ComPtr<ID3D11Device1>& dev)
-//{
-//    D3D11_TEXTURE2D_DESC desc{};
-//    desc.Format = DXGI_FORMAT_NV12;
-//    desc.Width = 1280;
-//    desc.Height = 720;
-//    desc.MipLevels = 1;
-//    desc.ArraySize = 33;
-//    desc.SampleDesc = { 1, 0 };
-//    desc.Usage = D3D11_USAGE_DEFAULT;
-//    desc.BindFlags = 520;
-//    desc.MiscFlags = 2;
-//
-//    ComPtr<ID3D11Texture2D> tex;
-//    Check(dev->CreateTexture2D(&desc, nullptr, tex.GetAddressOf()));
-//
-//    return tex;
-//}
-
-
-
 int main()
 {
     WindowClass c{};
     Window w;
-
+    VideoProducer p;
+    w.SetTexture(p.GetTexture());
+    
     w.Show();
     c.Run();
 

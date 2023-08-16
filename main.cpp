@@ -25,7 +25,7 @@ namespace {
         winrt::check_hresult(hr);
     }
 
-    ComPtr<ID3D11Device1> CreateDevice(int adapterIndex)
+    ComPtr<ID3D11Device1> CreateDeviceOnAdapter(int adapterIndex)
     {
         ComPtr<IDXGIFactory1> factory;
         Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
@@ -53,7 +53,8 @@ namespace {
             if (shaderCompileErrorsBlob)
                 errorString = static_cast<const char*>(shaderCompileErrorsBlob->GetBufferPointer());
 
-            std::wcerr << errorString << std::endl;
+            std::wcerr << "Error compiling shader: " << errorString << std::endl;
+
             Check(hResult);
         }
 
@@ -76,7 +77,6 @@ public:
         };
 
         Check(device->CreateInputLayout(desc.data(), static_cast<UINT>(desc.size()), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), m_inputLayout.GetAddressOf()));
-
     }
 
     void Apply(const ComPtr<ID3D11DeviceContext>& context) const
@@ -151,7 +151,6 @@ private:
             return rgb;
         }
     )";
-
 };
 
 class SamplerState
@@ -183,10 +182,10 @@ private:
     ComPtr<ID3D11SamplerState> m_samplerState;
 };
 
-class Texture
+class SharedShaderTexture
 {
 public:
-    Texture(const ComPtr<ID3D11Device1>& device)
+    SharedShaderTexture(const ComPtr<ID3D11Device1>& device)
         : m_device{ device }
     {
     }
@@ -262,10 +261,6 @@ class Quad
 {
 public:
     Quad(const ComPtr<ID3D11Device1>& device)
-        : m_vertexShader{ device }
-        , m_pixelShader{ device }
-        , m_sampler{ device }
-        , m_texture{ device }
     {
         using Vertex = std::array<float, 4>;
         std::array<Vertex, 6> vertexData = {
@@ -289,17 +284,39 @@ public:
         Check(device->CreateBuffer(&vertexBufferDesc, &data, m_vertexBuffer.GetAddressOf()));
     }
 
+    void Apply(const ComPtr<ID3D11DeviceContext>& context) const
+    {
+        ID3D11Buffer* buffers[] = { m_vertexBuffer.Get() };
+        constexpr UINT offset = 0;
+        context->IASetVertexBuffers(0, 1, buffers, &m_stride, &offset);
+        context->Draw(m_vertexCount, 0);
+    }
+
+private:
+    ComPtr<ID3D11Buffer> m_vertexBuffer;
+    UINT m_vertexCount;
+    UINT m_stride;
+};
+
+class VideoRenderer
+{
+public:
+    VideoRenderer(const ComPtr<ID3D11Device1>& device)
+        : m_vertexShader{ device }
+        , m_pixelShader{ device }
+        , m_sampler{ device }
+        , m_texture{ device }
+        , m_quad{ device }
+    {
+    }
+
     void Draw(const ComPtr<ID3D11DeviceContext1>& context)
     {
         m_vertexShader.Apply(context);
         m_pixelShader.Apply(context);
         m_sampler.Apply(context);
         m_texture.Apply(context);
-
-        ID3D11Buffer* vertBuffers[] = { m_vertexBuffer.Get() };
-        constexpr UINT offset = 0;
-        context->IASetVertexBuffers(0, 1, vertBuffers, &m_stride, &offset);
-        context->Draw(m_vertexCount, 0);
+        m_quad.Apply(context);
     }
 
     void SetTexture(const ComPtr<ID3D11Texture2D>& texture)
@@ -311,10 +328,8 @@ private:
     VertexShader m_vertexShader;
     PixelShader m_pixelShader;
     SamplerState m_sampler;
-    Texture m_texture;
-    ComPtr<ID3D11Buffer> m_vertexBuffer;
-    UINT m_vertexCount;
-    UINT m_stride;
+    SharedShaderTexture m_texture;
+    Quad m_quad;
 };
 
 class SwapChain
@@ -388,7 +403,7 @@ class VideoProducer
 {
 public:
     VideoProducer(int width, int height, int slices, int adapterIndex)
-        : m_device{ CreateDevice(adapterIndex) }
+        : m_device{ CreateDeviceOnAdapter(adapterIndex) }
     {
         m_device->GetImmediateContext1(m_context.GetAddressOf());
 
@@ -406,7 +421,6 @@ public:
         Check(m_device->CreateTexture2D(&esc, nullptr, m_texture.GetAddressOf()));
 
         Produce();
-
     }
 
     ~VideoProducer()
@@ -485,7 +499,6 @@ private:
     }
 
     std::thread m_thread;
-
     std::atomic_bool m_stopped = false;
     ComPtr<ID3D11Device1> m_device;
     ComPtr<ID3D11DeviceContext1> m_context;
@@ -497,7 +510,7 @@ private:
 struct VideoWindow
 {
     explicit VideoWindow(int adapterIndex)
-        : m_device{ CreateDevice(adapterIndex) }
+        : m_device{ CreateDeviceOnAdapter(adapterIndex) }
         , m_swapChain{ m_device, m_wnd }
         , m_quad{ m_device }
     {
@@ -557,7 +570,7 @@ private:
 
     const ComPtr<ID3D11Device1> m_device;
     SwapChain m_swapChain;
-    Quad m_quad;
+    VideoRenderer m_quad;
     SIZE m_size{};
 };
 
@@ -628,11 +641,18 @@ private:
 
 int main()
 {
-    int adapterIndex = 1;
-    WindowClass windowClass{};
-    VideoProducer producer{ 1200, 1024, 8,adapterIndex };
+    // TODO: Update to desired parameters
 
+    constexpr int adapterIndex = 0;
+    constexpr int width = 1200;
+    constexpr int height = 1024;
+    constexpr int numSlices = 8;
+
+    VideoProducer producer{ width, height, numSlices, adapterIndex };
+
+    WindowClass windowClass{};
     VideoWindow window{ adapterIndex };
+
     window.SetTexture(producer.GetTexture());
     producer.Start();
     window.Show();

@@ -52,37 +52,6 @@ namespace {
 
         return shaderCode;
     }
-
-    std::vector<std::vector<unsigned char>> CreateYUV420Sample(int rot, int width, int height, int layers)
-    {
-        std::vector<std::vector<unsigned char>> output(layers);
-        for (size_t l = 0; l < layers; ++l) {
-            const size_t rowPitch = width;
-
-            std::vector<unsigned char> bitmap(rowPitch * height * 3 / 2, 0);
-
-            // Populate the Y plane
-            for (size_t j = 0; j < height; ++j)
-                for (size_t i = 0; i < width; ++i)
-                    bitmap[i + j * rowPitch] = static_cast<unsigned char>((j * 255) / height);
-
-
-            // Populate UV plane (downsampled by 2 in both directions)
-            const size_t nLuma = rowPitch * height;
-            auto* UV = bitmap.data() + nLuma;
-
-            const size_t uvWidth = width / 2;
-            const size_t uwHeight = height / 2;
-            for (size_t j = 0; j < uwHeight; ++j)
-                for (size_t i = 0; i < uvWidth; ++i) {
-                    *UV++ = static_cast<unsigned char>(j * 255 / uwHeight + rot);
-                    *UV++ = static_cast<unsigned char>(i * 255 / uvWidth);
-                }
-
-            output[l] = bitmap;
-        }
-        return output;
-    }
 }
 
 class VertexShader
@@ -313,7 +282,7 @@ public:
         Check(device->CreateBuffer(&vertexBufferDesc, &data, m_vertexBuffer.GetAddressOf()));
     }
 
-    void Draw(const ComPtr<ID3D11DeviceContext1>& context) 
+    void Draw(const ComPtr<ID3D11DeviceContext1>& context)
     {
         m_vertexShader.Apply(context);
         m_pixelShader.Apply(context);
@@ -411,23 +380,15 @@ private:
 class VideoProducer
 {
 public:
-    VideoProducer()
+    VideoProducer(int width, int height, int slices)
     {
         m_device->GetImmediateContext1(m_context.GetAddressOf());
 
-        constexpr int width = 200;
-        constexpr int height = 100;
-        constexpr int pitch = width;
-
-        constexpr int layers = 30;
-        static int rot = 0;
-
-        // Create Texture
         D3D11_TEXTURE2D_DESC esc = {};
         esc.Width = width;
         esc.Height = height;
         esc.MipLevels = 1;
-        esc.ArraySize = layers;
+        esc.ArraySize = slices;
         esc.Format = DXGI_FORMAT_NV12;
         esc.SampleDesc = { 1, 0 };
         esc.Usage = D3D11_USAGE_DEFAULT;
@@ -436,17 +397,15 @@ public:
 
         Check(m_device->CreateTexture2D(&esc, nullptr, m_texture.GetAddressOf()));
 
-        m_thread = std::thread([this]
-        {
-            while(!m_stopped.load(std::memory_order_relaxed))
-                Produce();
-        });
+        Produce();
+
     }
 
     ~VideoProducer()
     {
         m_stopped.store(true, std::memory_order_relaxed);
-        m_thread.join();
+        if (m_thread.joinable())
+            m_thread.join();
     }
 
     ComPtr<ID3D11Texture2D> GetTexture()
@@ -454,27 +413,66 @@ public:
         return m_texture;
     }
 
+    void Start()
+    {
+        m_thread = std::thread([this]
+            {
+                while (!m_stopped.load(std::memory_order_relaxed))
+                    Produce();
+            });
+    }
+
 private:
+
+    std::vector<unsigned char>  CreateYUV420SampleImage(int chromaRotation, int width, int height)
+    {
+        const size_t rowPitch = width;
+        std::vector<unsigned char> bitmap(rowPitch * height * 3 / 2, 0);
+
+        // Populate the Y plane
+        for (size_t j = 0; j < height; ++j)
+            for (size_t i = 0; i < width; ++i)
+                bitmap[i + j * rowPitch] = static_cast<unsigned char>((j * 255) / height);
+
+
+        // Populate UV plane (downsampled by 2 in both directions)
+        const size_t nLuma = rowPitch * height;
+        auto* UV = bitmap.data() + nLuma;
+
+        const size_t uvWidth = width / 2;
+        const size_t uwHeight = height / 2;
+        for (size_t j = 0; j < uwHeight; ++j) {
+            for (size_t i = 0; i < uvWidth; ++i) {
+                *UV++ = static_cast<unsigned char>(j * 255 / uwHeight + chromaRotation);
+                *UV++ = static_cast<unsigned char>(i * 255 / uvWidth);
+            }
+        }
+        return bitmap;
+    }
+
+    /** Loops over texture array and updates each slice with a new YUV image */
     void Produce()
     {
         D3D11_TEXTURE2D_DESC desc = {};
         m_texture->GetDesc(&desc);
 
-        for(UINT layer = 0; layer < desc.ArraySize; ++ layer)
+        for (UINT sliceIdx = 0; sliceIdx < desc.ArraySize; ++sliceIdx)
         {
-            const auto image = CreateYUV420Sample(m_time + layer, desc.Width, desc.Height, 1).front();
+            const auto sliceImage = CreateYUV420SampleImage(m_time + sliceIdx, desc.Width, desc.Height);
             D3D11_SUBRESOURCE_DATA data{};
-            data.pSysMem = image.data();
+            data.pSysMem = sliceImage.data();
             data.SysMemPitch = desc.Width;
 
-            D3D11_TEXTURE2D_DESC planeDesc = desc;
-            planeDesc.ArraySize = 1;
-            planeDesc.Usage = D3D11_USAGE_IMMUTABLE;
+            D3D11_TEXTURE2D_DESC sliceDesc = desc;
+            sliceDesc.ArraySize = 1;
+            sliceDesc.Usage = D3D11_USAGE_IMMUTABLE;
 
-            ComPtr<ID3D11Texture2D> plane;
-            Check(m_device->CreateTexture2D(&planeDesc, &data, plane.GetAddressOf()));
-            m_context->CopySubresourceRegion1(m_texture.Get(), layer, 0, 0, 0, plane.Get(), 0, nullptr, D3D11_COPY_DISCARD);
+            ComPtr<ID3D11Texture2D> slice;
+            Check(m_device->CreateTexture2D(&sliceDesc, &data, slice.GetAddressOf()));
+
+            m_context->CopySubresourceRegion1(m_texture.Get(), sliceIdx, 0, 0, 0, slice.Get(), 0, nullptr, D3D11_COPY_DISCARD);
         }
+
         ++m_time;
     }
 
@@ -483,18 +481,18 @@ private:
     std::atomic_bool m_stopped = false;
     ComPtr<ID3D11Device1> m_device = CreateDevice();
     ComPtr<ID3D11DeviceContext1> m_context;
-    std::mutex m_mutex;
+
     ComPtr<ID3D11Texture2D> m_texture;
     int m_time = 0;
 };
 
-struct Window
+struct VideoWindow
 {
-    explicit Window()
+    explicit VideoWindow()
     {
     }
 
-    ~Window()
+    ~VideoWindow()
     {
         DestroyWindow(m_wnd);
     }
@@ -514,25 +512,22 @@ struct Window
             ComPtr<ID3D11DeviceContext1> context;
             m_device->GetImmediateContext1(context.GetAddressOf());
 
-
             const D3D11_VIEWPORT viewPorts[] = { {0.0f, 0.0f, static_cast<FLOAT>(m_size.cx), static_cast<FLOAT>(m_size.cy), 0.0f, 1.0f} };
             context->RSSetViewports(1, viewPorts);
 
             m_swapChain.Apply(context);
-
             m_quad.Draw(context);
             m_swapChain.Present();
+
             return 0;
         }
-        else if (uMsg == WM_SIZE)
+
+        if (uMsg == WM_SIZE)
         {
             m_size.cx = LOWORD(lParam);
             m_size.cy = HIWORD(lParam);
             m_swapChain.Resize(m_device, m_size);
-        }
-        else if (uMsg == WM_KEYDOWN)
-        {
-            
+            return 0;
         }
 
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -600,14 +595,14 @@ struct WindowClass
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        Window* window = nullptr;
+        VideoWindow* window = nullptr;
         if (uMsg == WM_NCCREATE) {
             const auto lpcs = reinterpret_cast<LPCREATESTRUCT>(lParam);
-            window = static_cast<Window*>(lpcs->lpCreateParams);
+            window = static_cast<VideoWindow*>(lpcs->lpCreateParams);
             SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window));
         }
         else {
-            window = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            window = reinterpret_cast<VideoWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         }
 
         if (window) {
@@ -620,16 +615,17 @@ private:
     const wchar_t* m_className = L"MyWindowClass";
 };
 
-
 int main()
 {
-    WindowClass c{};
-    Window w;
-    VideoProducer p;
-    w.SetTexture(p.GetTexture());
-    
-    w.Show();
-    c.Run();
+    WindowClass windowClass{};
+    VideoProducer producer{1200, 1024, 64};
+
+    VideoWindow window;
+    window.SetTexture(producer.GetTexture());
+    producer.Start();
+    window.Show();
+
+    windowClass.Run();
 
     return 0;
 }

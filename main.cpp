@@ -6,6 +6,7 @@
 #include <winrt/base.h>
 #include <d3dcompiler.h>
 #include <d3dcommon.h>
+#include <mutex>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -50,7 +51,37 @@ namespace {
         }
 
         return shaderCode;
+    }
 
+    std::vector<std::vector<unsigned char>> CreateYUV420Sample(int rot, int width, int height, int layers)
+    {
+        std::vector<std::vector<unsigned char>> output(layers);
+        for (size_t l = 0; l < layers; ++l) {
+            const size_t rowPitch = width;
+
+            std::vector<unsigned char> bitmap(rowPitch * height * 3 / 2, 0);
+
+            // Populate the Y plane
+            for (size_t j = 0; j < height; ++j)
+                for (size_t i = 0; i < width; ++i)
+                    bitmap[i + j * rowPitch] = static_cast<unsigned char>((j * 255) / height);
+
+
+            // Populate UV plane (downsampled by 2 in both directions)
+            const size_t nLuma = rowPitch * height;
+            auto* UV = bitmap.data() + nLuma;
+
+            const size_t uvWidth = width / 2;
+            const size_t uwHeight = height / 2;
+            for (size_t j = 0; j < uwHeight; ++j)
+                for (size_t i = 0; i < uvWidth; ++i) {
+                    *UV++ = static_cast<unsigned char>(j * 255 / uwHeight + rot);
+                    *UV++ = static_cast<unsigned char>(i * 255 / uvWidth);
+                }
+
+            output[l] = bitmap;
+        }
+        return output;
     }
 }
 
@@ -120,7 +151,8 @@ public:
 private:
     ComPtr<ID3D11PixelShader> m_pixelShader;
     static constexpr char s_pixelShader[] = R"(
-        Texture2D    mytexture : register(t0);
+        Texture2D    YTex : register(t0);
+        Texture2D    UVTex : register(t1);
         SamplerState mysampler : register(s0);
 
         struct VS_Output {
@@ -130,7 +162,17 @@ private:
 
         float4 ps_main(VS_Output input) : SV_Target
         {
-            return mytexture.Sample(mysampler, input.uv);   
+            float y = YTex.Sample(mysampler, input.uv).x;
+            float2 UV = UVTex.Sample(mysampler, input.uv).xy;
+            float u = UV.x - 0.5;
+            float v = UV.y - 0.5;
+
+            float4 rgb;
+            rgb.r = y + (1.403 * v);
+            rgb.g = y - (0.344 * u) - (0.714 * v);
+            rgb.b = y + (1.770 * u);
+
+            return rgb;
         }
     )";
 
@@ -171,44 +213,40 @@ public:
     Texture(const ComPtr<ID3D11Device1>& device)
         : m_device{ device }
     {
-        constexpr int texWidth = 200;
-        constexpr int texHeight = 100;
-        const std::vector<std::array<unsigned char, 4>> testTextureBytes(texWidth * texHeight, { 255, 0, 0, 255 });
-        constexpr int texBytesPerRow = 4 * texWidth;
+        //constexpr int texWidth = 200;
+        //constexpr int texHeight = 100;
+        //auto texData = CreateYUV420Sample(0, texWidth, texHeight, 1);
+        //constexpr int texBytesPerRow = 4 * texWidth;
 
-        // Create Texture
-        D3D11_TEXTURE2D_DESC textureDesc = {};
-        textureDesc.Width = texWidth;
-        textureDesc.Height = texHeight;
-        textureDesc.MipLevels = 1;
-        textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-        textureDesc.SampleDesc = {1, 0};
-        textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
-        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        //// Create Texture
+        //D3D11_TEXTURE2D_DESC textureDesc = {};
+        //textureDesc.Width = texWidth;
+        //textureDesc.Height = texHeight;
+        //textureDesc.MipLevels = 1;
+        //textureDesc.ArraySize = 1;
+        //textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        //textureDesc.SampleDesc = { 1, 0 };
+        //textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        //textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-        D3D11_SUBRESOURCE_DATA data[] = {
-            {testTextureBytes.data(), texBytesPerRow, 0}
-        };
+        //D3D11_SUBRESOURCE_DATA data[] = {
+        //    {texData.front().data(), texBytesPerRow, 0}
+        //};
 
-        Check(device->CreateTexture2D(&textureDesc, data, m_texture.GetAddressOf()));
+        //Check(device->CreateTexture2D(&textureDesc, data, m_texture.GetAddressOf()));
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-        viewDesc.Format = textureDesc.Format;
-        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        viewDesc.Texture2D.MostDetailedMip = 0;
-        viewDesc.Texture2D.MipLevels = 1;
-        Check(device->CreateShaderResourceView(m_texture.Get(), &viewDesc, m_textureView.GetAddressOf()));
+        //SetTexture(device, m_texture);
     }
 
-    void Apply(const ComPtr<ID3D11DeviceContext1>& context) const
+    void Apply(const ComPtr<ID3D11DeviceContext1>& context)
     {
-        ID3D11ShaderResourceView* textures[] = { m_textureView.Get() };
-        context->PSSetShaderResources(0, 1, textures);
-    }
-
-    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
-    {
+        ComPtr<ID3D11Texture2D> texture;
+        {
+            std::scoped_lock guard{m_mutex};
+            texture = m_sharedTexture;
+        }
+        if (!texture)
+            return;
         ComPtr<IDXGIResource1> dxgiResource;
         Check(texture.As(&dxgiResource));
 
@@ -240,19 +278,39 @@ public:
 
         m_texture = texCopy;
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-        viewDesc.Format = DXGI_FORMAT_R8G8_UNORM;
-        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        viewDesc.Texture2D.MostDetailedMip = 0;
-        viewDesc.Texture2D.MipLevels = 1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC yDesc{};
+        yDesc.Format = DXGI_FORMAT_R8_UNORM;
+        yDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        yDesc.Texture2D.MostDetailedMip = 0;
+        yDesc.Texture2D.MipLevels = 1;
 
-        Check(m_device->CreateShaderResourceView(m_texture.Get(), &viewDesc, m_textureView.ReleaseAndGetAddressOf()));
+        Check(m_device->CreateShaderResourceView(m_texture.Get(), &yDesc, m_yView.ReleaseAndGetAddressOf()));
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC uvDesc{};
+        uvDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+        uvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        uvDesc.Texture2D.MostDetailedMip = 0;
+        uvDesc.Texture2D.MipLevels = 1;
+
+        Check(m_device->CreateShaderResourceView(m_texture.Get(), &uvDesc, m_uvView.ReleaseAndGetAddressOf()));
+
+        ID3D11ShaderResourceView* textureViews[] = { m_yView.Get(), m_uvView.Get() };
+        context->PSSetShaderResources(0, 2, textureViews);
+    }
+
+    void SetTexture(const ComPtr<ID3D11Device1>& device, const ComPtr<ID3D11Texture2D>& texture)
+    {
+        std::scoped_lock guard{m_mutex};
+        m_sharedTexture = texture;
     }
 
 private:
+    mutable std::mutex m_mutex;
     ComPtr<ID3D11Device1> m_device;
     ComPtr<ID3D11Texture2D> m_texture;
-    ComPtr<ID3D11ShaderResourceView> m_textureView;
+    ComPtr<ID3D11ShaderResourceView> m_yView;
+    ComPtr<ID3D11ShaderResourceView> m_uvView;
+    ComPtr<ID3D11Texture2D> m_sharedTexture;
 };
 
 class Quad
@@ -286,7 +344,7 @@ public:
         Check(device->CreateBuffer(&vertexBufferDesc, &data, m_vertexBuffer.GetAddressOf()));
     }
 
-    void Draw(const ComPtr<ID3D11DeviceContext1>& context) const
+    void Draw(const ComPtr<ID3D11DeviceContext1>& context) 
     {
         m_vertexShader.Apply(context);
         m_pixelShader.Apply(context);
@@ -323,7 +381,7 @@ public:
         swapDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         swapDesc.BufferCount = 2;
         swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.SampleDesc = {1, 0};
+        swapDesc.SampleDesc = { 1, 0 };
         swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
         const auto factory = GetFactory(device);
@@ -425,44 +483,51 @@ struct Window
         }
         else if (uMsg == WM_KEYDOWN)
         {
-            const ComPtr<ID3D11Device1> device = CreateDevice();
-            constexpr int texWidth = 200;
-            constexpr int texHeight = 100;
-            constexpr int layers = 30;
-            const std::vector<char> testTextureBytes(texWidth * texHeight * 3 / 2, 128);
-            constexpr int texBytesPerRow = 12 * texWidth;
+            std::thread thd([this]()
+                {
+                while (true){
+                    const ComPtr<ID3D11Device1> device = CreateDevice();
+                    constexpr int texWidth = 200;
+                    constexpr int texHeight = 100;
+                    constexpr int rowPitch = texWidth;
 
-            // Create Texture
-            D3D11_TEXTURE2D_DESC textureDesc = {};
-            textureDesc.Width = texWidth;
-            textureDesc.Height = texHeight;
-            textureDesc.MipLevels = 1;
-            textureDesc.ArraySize = layers;
-            textureDesc.Format = DXGI_FORMAT_NV12;
-            textureDesc.SampleDesc = {1, 0};
-            textureDesc.Usage = D3D11_USAGE_DEFAULT;
-            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
-            textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+                    constexpr int layers = 30;
+                    static int rot = 0;
+                    auto testTextureBytes = CreateYUV420Sample(rot++, texWidth, texHeight, layers);
 
-            std::vector<D3D11_SUBRESOURCE_DATA> data(layers);
-            for (auto& layer : data)
-            {
-                layer.pSysMem = testTextureBytes.data();
-                layer.SysMemPitch = texWidth;
-                layer.SysMemSlicePitch = 0;
-            }
+                    // Create Texture
+                    D3D11_TEXTURE2D_DESC textureDesc = {};
+                    textureDesc.Width = texWidth;
+                    textureDesc.Height = texHeight;
+                    textureDesc.MipLevels = 1;
+                    textureDesc.ArraySize = layers;
+                    textureDesc.Format = DXGI_FORMAT_NV12;
+                    textureDesc.SampleDesc = { 1, 0 };
+                    textureDesc.Usage = D3D11_USAGE_DEFAULT;
+                    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
+                    textureDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
 
-            ComPtr<ID3D11Texture2D> texture;
-            Check(device->CreateTexture2D(&textureDesc, data.data(), texture.GetAddressOf()));
-            m_quad.SetTexture(device, texture);
-            InvalidateRect(m_wnd, nullptr, TRUE);
+                    std::vector<D3D11_SUBRESOURCE_DATA> data(layers);
+                    for (size_t i = 0; i < layers; ++i) {
+                        auto& layer = data[i];
+                        layer.pSysMem = testTextureBytes[i].data();
+                        layer.SysMemPitch = rowPitch;
+                        layer.SysMemSlicePitch = 0;
+                    }
+                    ComPtr<ID3D11Texture2D> texture;
+                    Check(device->CreateTexture2D(&textureDesc, data.data(), texture.GetAddressOf()));
+                    m_quad.SetTexture(device, texture);
+                    InvalidateRect(m_wnd, nullptr, TRUE);
+                }
+                });
+            m_threads.push_back(std::move(thd));
         }
 
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
 
 private:
-
+    std::vector<std::thread> m_threads;
     const HWND m_wnd = CreateWindowExW(0, L"MyWindowClass", L"MyTestWindow",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         nullptr, nullptr, GetModuleHandle(nullptr), this);

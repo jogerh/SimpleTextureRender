@@ -9,6 +9,7 @@
 #include <mutex>
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
 using Microsoft::WRL::ComPtr;
@@ -24,11 +25,17 @@ namespace {
         winrt::check_hresult(hr);
     }
 
-    ComPtr<ID3D11Device1> CreateDevice()
+    ComPtr<ID3D11Device1> CreateDevice(int adapterIndex)
     {
+        ComPtr<IDXGIFactory1> factory;
+        Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
+
+        ComPtr<IDXGIAdapter1> adapter;
+        Check(factory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()));
+
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
-        Check(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, device.GetAddressOf(), {}, context.GetAddressOf()));
+        Check(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, device.GetAddressOf(), {}, context.GetAddressOf()));
 
         ComPtr<ID3D11Device1> result;
         Check(device.As(&result));
@@ -380,7 +387,8 @@ private:
 class VideoProducer
 {
 public:
-    VideoProducer(int width, int height, int slices)
+    VideoProducer(int width, int height, int slices, int adapterIndex)
+        : m_device{ CreateDevice(adapterIndex) }
     {
         m_device->GetImmediateContext1(m_context.GetAddressOf());
 
@@ -424,7 +432,7 @@ public:
 
 private:
 
-    std::vector<unsigned char>  CreateYUV420SampleImage(int chromaRotation, int width, int height)
+    std::vector<unsigned char> CreateYUV420SampleImage(int chromaRotation, int width, int height)
     {
         const size_t rowPitch = width;
         std::vector<unsigned char> bitmap(rowPitch * height * 3 / 2, 0);
@@ -479,16 +487,19 @@ private:
     std::thread m_thread;
 
     std::atomic_bool m_stopped = false;
-    ComPtr<ID3D11Device1> m_device = CreateDevice();
+    ComPtr<ID3D11Device1> m_device;
     ComPtr<ID3D11DeviceContext1> m_context;
-
     ComPtr<ID3D11Texture2D> m_texture;
+
     int m_time = 0;
 };
 
 struct VideoWindow
 {
-    explicit VideoWindow()
+    explicit VideoWindow(int adapterIndex)
+        : m_device{ CreateDevice(adapterIndex) }
+        , m_swapChain{ m_device, m_wnd }
+        , m_quad{ m_device }
     {
     }
 
@@ -544,9 +555,9 @@ private:
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         nullptr, nullptr, GetModuleHandle(nullptr), this);
 
-    const ComPtr<ID3D11Device1> m_device = CreateDevice();
-    SwapChain m_swapChain{ m_device, m_wnd };
-    Quad m_quad{ m_device };
+    const ComPtr<ID3D11Device1> m_device;
+    SwapChain m_swapChain;
+    Quad m_quad;
     SIZE m_size{};
 };
 
@@ -617,10 +628,11 @@ private:
 
 int main()
 {
+    int adapterIndex = 1;
     WindowClass windowClass{};
-    VideoProducer producer{1200, 1024, 64};
+    VideoProducer producer{ 1200, 1024, 8,adapterIndex };
 
-    VideoWindow window;
+    VideoWindow window{ adapterIndex };
     window.SetTexture(producer.GetTexture());
     producer.Start();
     window.Show();
